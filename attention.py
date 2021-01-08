@@ -3,6 +3,8 @@ import torch
 from torch import nn
 import torch.nn.functional as F
 
+import utils
+
 MAX_SEQ_LEN = 4096
 
 
@@ -34,7 +36,6 @@ def get_single_block_row_attention(block_id,
                               dtype=np.int32)
     # permute the blocks
     perm_block = np.random.permutation(to_block_list)
-    # print(perm_block)
 
     # illegal blocks for the current block id, using window
     illegal_blocks = list(
@@ -60,6 +61,7 @@ def get_single_block_row_attention(block_id,
             selected_random_blokcs.append(perm_block[i])
         if len(selected_random_blokcs) == num_rand_blocks:
             break
+    print(np.array(selected_random_blokcs).shape)
     return np.array(selected_random_blokcs, dtype=np.int32)
 
 
@@ -98,6 +100,8 @@ def bigbird_block_rand_mask_with_head(from_seq_length,
     assert from_seq_length // from_block_size == to_seq_length // to_block_size, \
         "Error the number of blocks needs to be same!"
 
+    print("lengths ", from_seq_length, from_block_size, to_seq_length, to_block_size)
+
     assert from_seq_length in plan_from_length, \
         "Error from sequence length not in plan!"
 
@@ -111,7 +115,7 @@ def bigbird_block_rand_mask_with_head(from_seq_length,
     rand_attn = [np.zeros((num_blocks,
                            np.sum(plan_num_rand_blocks[:max_plan_idx + 1])),
                           dtype=np.int32) for i in range(num_heads)]
-
+    print(rand_attn)
     # We will go iteratively over the plan blocks and pick random number of
     # Attention blocks from the legally allowed blocks
     for plan_idx in range(max_plan_idx + 1):
@@ -128,8 +132,7 @@ def bigbird_block_rand_mask_with_head(from_seq_length,
                                         plan_block_length[plan_idx - 1]):
                     for h in range(num_heads):
                         # print("head", h, "blk_rw_idx", blk_rw_idx)
-                        rand_attn[h][blk_rw_idx,
-                        rnd_r_cnt:curr_r_cnt] = get_single_block_row_attention(
+                        rand_attn[h][blk_rw_idx, rnd_r_cnt:curr_r_cnt] = get_single_block_row_attention(
                             block_id=blk_rw_idx,
                             to_start_block_id=plan_block_length[plan_idx - 1],
                             to_end_block_id=plan_block_length[plan_idx],
@@ -152,8 +155,7 @@ def bigbird_block_rand_mask_with_head(from_seq_length,
                     curr_r_cnt = int(np.sum(plan_num_rand_blocks[:pl_id + 1]))
                     for h in range(num_heads):
                         # print("head", h, "blk_rw_idx", blk_rw_idx)
-                        rand_attn[h][blk_rw_idx,
-                        rnd_r_cnt:curr_r_cnt] = get_single_block_row_attention(
+                        rand_attn[h][blk_rw_idx, rnd_r_cnt:curr_r_cnt] = get_single_block_row_attention(
                             block_id=blk_rw_idx,
                             to_start_block_id=to_start_block_id,
                             to_end_block_id=plan_block_length[pl_id],
@@ -245,6 +247,8 @@ def bigbird_block_rand_mask(from_seq_length,
     assert from_seq_length // from_block_size == to_seq_length // to_block_size, \
         "Error the number of blocks needs to be same!"
 
+    print(from_seq_length, from_block_size, to_seq_length, to_block_size)
+
     rand_attn = np.zeros(
         (from_seq_length // from_block_size - 2, num_rand_blocks), dtype=np.int32)
     middle_seq = np.arange(1, to_seq_length // to_block_size - 1, dtype=np.int32)
@@ -297,6 +301,7 @@ def full_bigbird_mask(from_seq_length,
   Returns:
     attention mask matrix of shape [from_seq_length, to_seq_length]
   """
+    print('rand_attn ', rand_attn)
     if rand_attn is None:
         rand_attn = bigbird_block_rand_mask(MAX_SEQ_LEN, MAX_SEQ_LEN,
                                             from_block_size, to_block_size,
@@ -345,46 +350,18 @@ def create_rand_mask_from_inputs(from_blocked_mask,
                            from_block_size, num_rand_blocks*to_block_size].
   """
     num_windows = from_seq_length // from_block_size - 2
-    rand_mask = torch.view(
-        torch.gather(to_blocked_mask, 1, rand_attn), [
-            batch_size, num_attention_heads, num_windows,
-            num_rand_blocks * from_block_size
-        ])
+    rand_mask = utils.torch_gather4d(to_blocked_mask, rand_attn)
+    rand_mask = rand_mask.view(
+        batch_size, num_attention_heads, num_windows,
+        num_rand_blocks * from_block_size
+    )
     rand_mask = torch.einsum("blq,bhlk->bhlqk", from_blocked_mask[:, 1:-1],
                              rand_mask)
     return rand_mask
 
 
-def create_band_mask_from_inputs(from_blocked_mask, to_blocked_mask):
-    """Create 3D attention mask from a 2D tensor mask.
-  Args:
-    from_blocked_mask: 2D Tensor of shape [batch_size,
-      from_seq_length//from_block_size, from_block_size].
-    to_blocked_mask: int32 Tensor of shape [batch_size,
-      to_seq_length//to_block_size, to_block_size].
-  Returns:
-    float Tensor of shape [batch_size, 1, from_seq_length//from_block_size-4,
-                           from_block_size,  3*to_block_size].
-  """
-    exp_blocked_to_pad = torch.cat(
-        (to_blocked_mask[:, 1:-3], to_blocked_mask[:, 2:-2],
-         to_blocked_mask[:, 3:-1]), 2)
-    band_mask = torch.einsum("blq,blk->blqk",
-                             from_blocked_mask[:, 2:-2].float(),
-                             exp_blocked_to_pad.float32())
-    band_mask = torch.unsqueeze(band_mask, 1)
-    return band_mask
-
-
 def create_attention_mask_from_input_mask(from_mask, to_mask):
-    """Create attention mask from a 2D tensor mask.
-  Args:
-    from_mask: int32 Tensor of shape [batch_size, from_seq_length].
-    to_mask: int32 Tensor of shape [batch_size, to_seq_length].
-  Returns:
-    int32 Tensor of shape [batch_size, 1, from_seq_length, to_seq_length].
-  """
-    mask = torch.einsum("BF,BT->BFT", from_mask, to_mask)
+    mask = torch.einsum("bf,bt->bft", from_mask, to_mask)
 
     # expand to create a slot for heads.
     mask = torch.unsqueeze(mask, 1)
@@ -393,19 +370,21 @@ def create_attention_mask_from_input_mask(from_mask, to_mask):
 
 
 class OriginalFullAttention(nn.Module):
-    def __init__(self, attn_dropout=0.1):
+    def __init__(self, size_per_head, attn_dropout=0.1):
         super().__init__()
         self.dropout = nn.Dropout(attn_dropout)
+        self.size_per_head = size_per_head
 
     def forward(self, query_layer,
                 key_layer,
                 value_layer,
-                attention_mask,
-                size_per_head):
+                attention_mask):
         # Directly take n^2 dot product between "query" and "key".
+        print('query_layer.shape ', query_layer.shape)
+        print('key_layer.shape ', key_layer.shape)
         attention_scores = torch.einsum("bnfh,bnth->bnft", query_layer, key_layer)
-        attention_scores = torch.multiply(attention_scores,
-                                          1.0 / np.sqrt(float(size_per_head)))
+        attention_scores = torch.mul(attention_scores,
+                                     1.0 / np.sqrt(float(self.size_per_head)))
 
         if attention_mask is not None:
             # Since attention_mask is 1.0 for positions we want to attend and 0.0 for
@@ -431,42 +410,50 @@ class OriginalFullAttention(nn.Module):
 
 
 class BigbirdSimulatedAttention(nn.Module):
-    def __init__(self, attn_dropout=0.1):
+    def __init__(self, num_attention_heads, size_per_head, num_rand_blocks, from_block_size, to_block_size, seed=None,
+                 attn_dropout=0.1):
         super().__init__()
-        self.original_full_attention = OriginalFullAttention(attn_dropout)
+        self.original_full_attention = OriginalFullAttention(size_per_head, attn_dropout)
+
+        self.num_attention_heads = num_attention_heads
+        self.size_per_head = size_per_head
+
+        self.num_rand_blocks = num_rand_blocks
+        self.from_block_size = from_block_size
+        self.to_block_size = to_block_size
+
+        self.seed = seed
 
     def forward(self, query_layer,
                 key_layer,
                 value_layer,
                 attention_mask,
-                num_attention_heads,
-                num_rand_blocks,
-                size_per_head,
                 from_seq_length,
-                to_seq_length,
-                from_block_size,
-                to_block_size,
-                seed=None):
-        if seed:
-            np.random.seed(seed)
+                to_seq_length):
+
+        if self.seed:
+            np.random.seed(self.seed)
 
         plan_from_length, plan_num_rand_blocks = get_rand_attn_plan(
-            from_seq_length, from_block_size, num_rand_blocks)
+            from_seq_length, self.from_block_size, self.num_rand_blocks)
 
         rand_attn = bigbird_block_rand_mask_with_head(
             from_seq_length=from_seq_length,
             to_seq_length=to_seq_length,
-            from_block_size=from_block_size,
-            to_block_size=to_block_size,
-            num_heads=num_attention_heads,
+            from_block_size=self.from_block_size,
+            to_block_size=self.to_block_size,
+            num_heads=self.num_attention_heads,
             plan_from_length=plan_from_length,
             plan_num_rand_blocks=plan_num_rand_blocks)
+
         temp_mask = [
-            full_bigbird_mask(  # pylint: disable=g-complex-comprehension
-                from_seq_length, to_seq_length, from_block_size, to_block_size,
-                num_rand_blocks, rand_attn=rand_attn[i], focus=1024)
-            for i in range(num_attention_heads)
+            full_bigbird_mask(
+                from_seq_length, to_seq_length, self.from_block_size, self.to_block_size,
+                self.num_rand_blocks, rand_attn=rand_attn[i], focus=1024
+            )
+            for i in range(self.num_attention_heads)
         ]
+
         temp_mask = np.stack(temp_mask, axis=0)
         temp_mask = np.array(temp_mask, dtype=bool)
 
@@ -480,11 +467,21 @@ class BigbirdSimulatedAttention(nn.Module):
                                             key_layer,
                                             value_layer,
                                             attention_mask,
-                                            size_per_head)
+                                            self.size_per_head)
+
 
 class BigbirdBlockSpareAttention(nn.Module):
-    def __init__(self):
+    def __init__(self, num_attention_heads, size_per_head, num_rand_blocks, from_block_size, to_block_size, seed=None):
         super().__init__()
+
+        self.num_attention_heads = num_attention_heads
+        self.size_per_head = size_per_head
+
+        self.num_rand_blocks = num_rand_blocks
+        self.from_block_size = from_block_size
+        self.to_block_size = to_block_size
+
+        self.seed = seed
 
     def forward(self, query_layer,
                 key_layer,
@@ -494,19 +491,13 @@ class BigbirdBlockSpareAttention(nn.Module):
                 to_mask,
                 from_blocked_mask,
                 to_blocked_mask,
-                num_attention_heads,
-                num_rand_blocks,
-                size_per_head,
                 batch_size,
                 from_seq_length,
                 to_seq_length,
-                from_block_size,
-                to_block_size,
-                seed=None,
                 plan_from_length=None,
                 plan_num_rand_blocks=None):
 
-        assert from_seq_length // from_block_size == to_seq_length // to_block_size
+        assert from_seq_length // self.from_block_size == to_seq_length // self.to_block_size
 
         # cast masks to float
         from_mask = from_mask.float()
@@ -516,191 +507,166 @@ class BigbirdBlockSpareAttention(nn.Module):
         to_blocked_mask = to_blocked_mask.float()
 
         # generate random attention and corresponding masks
-        np.random.seed(seed)
+        np.random.seed(self.seed)
         if from_seq_length in [1024, 3072, 4096]:  # old plans used in paper
             rand_attn = [
                 bigbird_block_rand_mask(  # pylint: disable=g-complex-comprehension
                     MAX_SEQ_LEN, MAX_SEQ_LEN,
-                    from_block_size, to_block_size, num_rand_blocks,
-                    last_idx=1024)[:(from_seq_length // from_block_size - 2)]
-                for _ in range(num_attention_heads)
+                    self.from_block_size, self.to_block_size, self.num_rand_blocks,
+                    last_idx=1024)[:(from_seq_length // self.from_block_size - 2)]
+                for _ in range(self.num_attention_heads)
             ]
         else:
             if plan_from_length is None:
                 plan_from_length, plan_num_rand_blocks = get_rand_attn_plan(
-                    from_seq_length, from_block_size, num_rand_blocks)
+                    from_seq_length, self.from_block_size, self.num_rand_blocks)
 
             rand_attn = bigbird_block_rand_mask_with_head(
                 from_seq_length=from_seq_length,
                 to_seq_length=to_seq_length,
-                from_block_size=from_block_size,
-                to_block_size=to_block_size,
-                num_heads=num_attention_heads,
+                from_block_size=self.from_block_size,
+                to_block_size=self.to_block_size,
+                num_heads=self.num_attention_heads,
                 plan_from_length=plan_from_length,
                 plan_num_rand_blocks=plan_num_rand_blocks)
 
         rand_attn = np.stack(rand_attn, axis=0)
         rand_attn = torch.from_numpy(rand_attn).long()
         rand_attn = torch.unsqueeze(rand_attn, 0)
-        rand_attn = tf.repeat(rand_attn, batch_size, 0)
+        rand_attn = torch.repeat_interleave(rand_attn, batch_size, 0)
 
         rand_mask = create_rand_mask_from_inputs(
             from_blocked_mask, to_blocked_mask, rand_attn,
-            num_attention_heads, num_rand_blocks,
-            batch_size, from_seq_length, from_block_size, )
+            self.num_attention_heads, self.num_rand_blocks,
+            batch_size, from_seq_length, self.from_block_size, )
 
         # Define shorthands
-        h = num_attention_heads
-        r = num_rand_blocks
-        d = size_per_head
+        h = self.num_attention_heads
+        r = self.num_rand_blocks
+        d = self.size_per_head
         b = batch_size
         m = from_seq_length
         n = to_seq_length
-        wm = from_block_size
-        wn = to_block_size
+        wm = self.from_block_size
+        wn = self.to_block_size
 
-        blocked_query_matrix = tf.reshape(query_layer, (b, h, m // wm, wm, -1))
-        blocked_key_matrix = tf.reshape(key_layer, (b, h, n // wn, wn, -1))
-        blocked_value_matrix = tf.reshape(value_layer, (b, h, n // wn, wn, -1))
-        gathered_key = tf.reshape(
-            tf.gather(blocked_key_matrix, rand_attn, batch_dims=2, name="gather_key"),
-            (b, h, m // wm - 2, r * wn, -1))  # [b, h, n//wn-2, r, wn, -1]
-        gathered_value = tf.reshape(
-            tf.gather(
-                blocked_value_matrix, rand_attn, batch_dims=2, name="gather_value"),
-            (b, h, m // wm - 2, r * wn, -1))  # [b, h, n//wn-2, r, wn, -1]
-
-        first_product = tf.einsum(
-            "BHQD,BHKD->BHQK", blocked_query_matrix[:, :, 0],
+        blocked_query_matrix = query_layer.view((b, h, m // wm, wm, -1))
+        blocked_key_matrix = key_layer.view((b, h, n // wn, wn, -1))
+        blocked_value_matrix = value_layer.view((b, h, n // wn, wn, -1))
+        gathered_key = utils.torch_gather5d(blocked_key_matrix, rand_attn).view((b, h, m // wm - 2, r * wn, -1))
+        gathered_value = utils.torch_gather5d(blocked_value_matrix, rand_attn).view((b, h, m // wm - 2, r * wn, -1))
+        first_product = torch.einsum(
+            "bhqd,bhkd->bhqk", blocked_query_matrix[:, :, 0],
             key_layer)  # [b, h, wm, -1] x [b, h, n, -1] ==> [b, h, wm, n]
-        first_product = tf.multiply(first_product, 1.0 / np.sqrt(d))
+        first_product = torch.mul(first_product, 1.0 / np.sqrt(d))
         first_product += (1.0 - to_mask) * -10000.0
-        first_attn_weights = tf.nn.softmax(first_product)  # [b, h, wm, n]
-        first_context_layer = tf.einsum(
-            "BHQK,BHKD->BHQD", first_attn_weights,
+        first_attn_weights = F.softmax(first_product, -1)  # [b, h, wm, n]
+        first_context_layer = torch.einsum(
+            "bhqk,bhkd->bhqd", first_attn_weights,
             value_layer)  # [b, h, wm, n] x [b, h, n, -1] ==> [b, h, wm, -1]
-        first_context_layer = tf.expand_dims(first_context_layer, 2)
-
-        second_key_mat = tf.concat([
+        first_context_layer = torch.unsqueeze(first_context_layer, 2)
+        second_key_mat = torch.cat((
             blocked_key_matrix[:, :, 0], blocked_key_matrix[:, :, 1],
             blocked_key_matrix[:, :, 2], blocked_key_matrix[:, :, -1],
-            gathered_key[:, :, 0]], 2)  # [b, h, (4+r)*wn, -1]
-        second_value_mat = tf.concat([
+            gathered_key[:, :, 0]), 2)  # [b, h, (4+r)*wn, -1]
+        second_value_mat = torch.cat((
             blocked_value_matrix[:, :, 0], blocked_value_matrix[:, :, 1],
             blocked_value_matrix[:, :, 2], blocked_value_matrix[:, :, -1],
-            gathered_value[:, :, 0]], 2)  # [b, h, (4+r)*wn, -1]
-        second_product = tf.einsum(
-            "BHQD,BHKD->BHQK", blocked_query_matrix[:, :, 1], second_key_mat
-        )  # [b, h, wm, -1] x [b, h, (4+r)*wn, -1] ==> [b, h, wm, (4+r)*wn]
-        second_seq_pad = tf.concat([
+            gathered_value[:, :, 0]), 2)  # [b, h, (4+r)*wn, -1]
+        second_product = torch.einsum(
+            "bhqd,bhkd->bhqk", blocked_query_matrix[:, :, 1], second_key_mat
+        )
+        second_seq_pad = torch.cat((
             to_mask[:, :, :, :3 * wn], to_mask[:, :, :, -wn:],
-            tf.ones([b, 1, 1, r * wn], dtype=tf.float32)], 3)
-        second_rand_pad = tf.concat(
-            [tf.ones([b, h, wm, 4 * wn], dtype=tf.float32), rand_mask[:, :, 0]], 3)
-        second_product = tf.multiply(second_product, 1.0 / np.sqrt(d))
-        second_product += (1.0 -
-                           tf.minimum(second_seq_pad, second_rand_pad)) * -10000.0
-        second_attn_weights = tf.nn.softmax(second_product)  # [b , h, wm, (4+r)*wn]
-        second_context_layer = tf.einsum(
-            "BHQK,BHKD->BHQD", second_attn_weights, second_value_mat
-        )  # [b, h, wm, (4+r)*wn] x [b, h, (4+r)*wn, -1] ==> [b, h, wm, -1]
-        second_context_layer = tf.expand_dims(second_context_layer, 2)
-
-        exp_blocked_key_matrix = tf.concat([
+            torch.ones(b, 1, 1, r * wn).long()), 3)
+        second_rand_pad = torch.cat(
+            (torch.ones(b, h, wm, 4 * wn).long(), rand_mask[:, :, 0]), 3)
+        second_product = torch.mul(second_product, 1.0 / np.sqrt(d))
+        second_product += (1.0 - torch.minimum(second_seq_pad, second_rand_pad)) * -10000.0
+        second_attn_weights = F.softmax(second_product, -1)
+        second_context_layer = torch.einsum(
+            "bhqk,bhkd->bhqd", second_attn_weights, second_value_mat
+        )
+        second_context_layer = torch.unsqueeze(second_context_layer, 2)
+        exp_blocked_key_matrix = torch.cat((
             blocked_key_matrix[:, :, 1:-3], blocked_key_matrix[:, :, 2:-2],
-            blocked_key_matrix[:, :, 3:-1]], 3)  # [b, h, m//wm-4, 3*wn, -1]
-        exp_blocked_value_matrix = tf.concat([
+            blocked_key_matrix[:, :, 3:-1]), 3)  # [b, h, m//wm-4, 3*wn, -1]
+        exp_blocked_value_matrix = torch.cat((
             blocked_value_matrix[:, :, 1:-3], blocked_value_matrix[:, :, 2:-2],
-            blocked_value_matrix[:, :, 3:-1]], 3)  # [b, h, m//wm-4, 3*wn, -1]
+            blocked_value_matrix[:, :, 3:-1]), 3)  # [b, h, m//wm-4, 3*wn, -1]
         middle_query_matrix = blocked_query_matrix[:, :, 2:-2]
-        inner_band_product = tf.einsum(
-            "BHLQD,BHLKD->BHLQK", middle_query_matrix, exp_blocked_key_matrix
-        )  # [b, h, m//wm-4, wm, -1] x [b, h, m//wm-4, 3*wn, -1]
-        #     ==> [b, h, m//wm-4, wm, 3*wn]
-        inner_band_product = tf.multiply(inner_band_product, 1.0 / np.sqrt(d))
-        rand_band_product = tf.einsum(
-            "BHLQD,BHLKD->BHLQK", middle_query_matrix, gathered_key[:, :, 1:-1]
-        )  # [b, h, m//wm-4, wm, -1] x [b, h, m//wm-4, r*wn, -1]
-        #     ==> [b, h, m//wm-4, wm, r*wn]
-        rand_band_product = tf.multiply(rand_band_product, 1.0 / np.sqrt(d))
-        first_band_product = tf.einsum(
-            "BHLQD,BHKD->BHLQK", middle_query_matrix, blocked_key_matrix[:, :, 0]
-        )  # [b, h, m//wm-4, wm, -1] x [b, h, wn, -1] ==> [b, h, m//wm-4, wm, wn]
-        first_band_product = tf.multiply(first_band_product, 1.0 / np.sqrt(d))
-        last_band_product = tf.einsum(
-            "BHLQD,BHKD->BHLQK", middle_query_matrix, blocked_key_matrix[:, :, -1]
-        )  # [b, h, m//wm-4, wm, -1] x [b, h, wn, -1] ==> [b, h, m//wm-4, wm, wn]
-        last_band_product = tf.multiply(last_band_product, 1.0 / np.sqrt(d))
+        inner_band_product = torch.einsum(
+            "bhlqd,bhlkd->bhlqk", middle_query_matrix, exp_blocked_key_matrix
+        )
+        inner_band_product = torch.mul(inner_band_product, 1.0 / np.sqrt(d))
+        rand_band_product = torch.einsum(
+            "bhlqd,bhlkd->bhlqk", middle_query_matrix, gathered_key[:, :, 1:-1]
+        )
+        rand_band_product = torch.mul(rand_band_product, 1.0 / np.sqrt(d))
+        first_band_product = torch.einsum(
+            "bhlqd,bhkd->bhlqk", middle_query_matrix, blocked_key_matrix[:, :, 0]
+        )
+        first_band_product = torch.mul(first_band_product, 1.0 / np.sqrt(d))
+        last_band_product = torch.einsum(
+            "bhlqd,bhkd->bhlqk", middle_query_matrix, blocked_key_matrix[:, :, -1]
+        )
+        last_band_product = torch.mul(last_band_product, 1.0 / np.sqrt(d))
         inner_band_product += (1.0 - band_mask) * -10000.0
-        first_band_product += (
-                                      1.0 - tf.expand_dims(to_mask[:, :, :, :wn], 3)) * -10000.0
-        last_band_product += (
-                                     1.0 - tf.expand_dims(to_mask[:, :, :, -wn:], 3)) * -10000.0
+        first_band_product += (1.0 - torch.unsqueeze(to_mask[:, :, :, :wn], 3)) * -10000.0
+        last_band_product += (1.0 - torch.unsqueeze(to_mask[:, :, :, -wn:], 3)) * -10000.0
         rand_band_product += (1.0 - rand_mask[:, :, 1:-1]) * -10000.0
-        band_product = tf.concat([
+        band_product = torch.cat((
             first_band_product, inner_band_product, rand_band_product,
-            last_band_product], -1)  # [b, h, m//wm-4, wm, (5+r)*wn]
-        attn_weights = tf.nn.softmax(band_product)  # [b, h, m//wm-4, wm, (5+r)*wn]
-        context_layer = tf.einsum(
-            "BHLQK,BHLKD->BHLQD", attn_weights[:, :, :, :, wn:4 * wn],
+            last_band_product), -1)
+        attn_weights = F.softmax(band_product, -1)
+        context_layer = torch.einsum(
+            "bhlqk,bhlkd->bhlqd", attn_weights[:, :, :, :, wn:4 * wn],
             exp_blocked_value_matrix
-        )  # [b, h, m//wm-4, wm, 3*wn] x [b, h, m//wm-4, 3*wn, -1]
-        #     ==> [b, h, m//wm-4, wm, -1]
-        context_layer += tf.einsum(
-            "BHLQK,BHLKD->BHLQD", attn_weights[:, :, :, :, 4 * wn:-wn],
+        )
+        context_layer += torch.einsum(
+            "bhlqk,bhlkd->bhlqd", attn_weights[:, :, :, :, 4 * wn:-wn],
             gathered_value[:, :, 1:-1]
-        )  # [b, h, m//wm-4, wm, r*wn] x [b, h, m//wm-4, r*wn, -1]
-        #     ==> [b, h, m//wm-4, wm, -1]
-        context_layer += tf.einsum(
-            "BHLQK,BHKD->BHLQD", attn_weights[:, :, :, :, :wn],
+        )
+        context_layer += torch.einsum(
+            "bhlqk,bhkd->bhlqd", attn_weights[:, :, :, :, :wn],
             blocked_value_matrix[:, :, 0]
-        )  # [b, h, m//wm-4, wm, wn] x [b, h, wn, -1] ==> [b, h, m//wm-4, wm, -1]
-        context_layer += tf.einsum(
-            "BHLQK,BHKD->BHLQD", attn_weights[:, :, :, :, -wn:],
+        )
+        context_layer += torch.einsum(
+            "bhlqk,bhkd->bhlqd", attn_weights[:, :, :, :, -wn:],
             blocked_value_matrix[:, :, -1]
-        )  # [b, h, m//wm-4, wm, wn] x [b, h, wn, -1] ==> [b, h, m//wm-4, wm, -1]
-
-        second_last_key_mat = tf.concat([
+        )
+        second_last_key_mat = torch.cat((
             blocked_key_matrix[:, :, 0], blocked_key_matrix[:, :, -3],
             blocked_key_matrix[:, :, -2], blocked_key_matrix[:, :, -1],
-            gathered_key[:, :, -1]], 2)  # [b, h, (4+r)*wn, -1]
-        second_last_value_mat = tf.concat([
+            gathered_key[:, :, -1]), 2)
+        second_last_value_mat = torch.cat((
             blocked_value_matrix[:, :, 0], blocked_value_matrix[:, :, -3],
             blocked_value_matrix[:, :, -2], blocked_value_matrix[:, :, -1],
-            gathered_value[:, :, -1]], 2)  # [b, h, (4+r)*wn, -1]
-        second_last_product = tf.einsum(
-            "BHQD,BHKD->BHQK", blocked_query_matrix[:, :, -2], second_last_key_mat
-        )  # [b, h, wm, -1] x [b, h, (4+r)*wn, -1] ==> [b, h, wm, (4+r)*wn]
-        second_last_seq_pad = tf.concat([
+            gathered_value[:, :, -1]), 2)
+        second_last_product = torch.einsum(
+            "bhqd,bhkd->bhqk", blocked_query_matrix[:, :, -2], second_last_key_mat
+        )
+        second_last_seq_pad = torch.cat((
             to_mask[:, :, :, :wn], to_mask[:, :, :, -3 * wn:],
-            tf.ones([b, 1, 1, r * wn], dtype=tf.float32)], 3)
-        second_last_rand_pad = tf.concat(
-            [tf.ones([b, h, wm, 4 * wn], dtype=tf.float32), rand_mask[:, :, -1]], 3)
-        second_last_product = tf.multiply(second_last_product, 1.0 / np.sqrt(d))
-        second_last_product += (
-                                       1.0 - tf.minimum(second_last_seq_pad, second_last_rand_pad)) * -10000.0
-        second_last_attn_weights = tf.nn.softmax(
-            second_last_product)  # [b, h, wm, (4+r)*wn]
-        second_last_context_layer = tf.einsum(
-            "BHQK,BHKD->BHQD", second_last_attn_weights, second_last_value_mat
-        )  # [b, h, wm, (4+r)*wn] x [b, h, (4+r)*wn, -1] ==> [b, h, wm, -1]
-        second_last_context_layer = tf.expand_dims(second_last_context_layer, 2)
-
-        last_product = tf.einsum(
-            "BHQD,BHKD->BHQK", blocked_query_matrix[:, :, -1],
-            key_layer)  # [b, h, wm, -1] x [b, h, n, -1] ==> [b, h, wm, n]
-        last_product = tf.multiply(last_product, 1.0 / np.sqrt(d))
+            torch.ones(b, 1, 1, r * wn).long()), 3)
+        second_last_rand_pad = torch.cat((
+            torch.ones(b, h, wm, 4 * wn).long(), rand_mask[:, :, -1]), 3)
+        second_last_product = torch.mul(second_last_product, 1.0 / np.sqrt(d))
+        second_last_product += (1.0 - torch.minimum(second_last_seq_pad, second_last_rand_pad)) * -10000.0
+        second_last_attn_weights = F.softmax(second_last_product, -1)
+        second_last_context_layer = torch.einsum("bhqk,bhkd->bhqd", second_last_attn_weights, second_last_value_mat)
+        second_last_context_layer = torch.unsqueeze(second_last_context_layer, 2)
+        last_product = torch.einsum("bhqd,bhkd->bhqk", blocked_query_matrix[:, :, -1], key_layer)
+        last_product = torch.mul(last_product, 1.0 / np.sqrt(d))
         last_product += (1.0 - to_mask) * -10000.0
-        last_attn_weights = tf.nn.softmax(last_product)  # [b, h, wm, n]
-        last_context_layer = tf.einsum(
-            "BHQK,BHKD->BHQD", last_attn_weights,
-            value_layer)  # [b, h, wm, n] x [b, h, n, -1] ==> [b, h, wm, -1]
-        last_context_layer = tf.expand_dims(last_context_layer, 2)
-
-        context_layer = tf.concat([
+        last_attn_weights = F.softmax(last_product, -1)
+        last_context_layer = torch.einsum("bhqk,bhkd->bhqd", last_attn_weights, value_layer)
+        last_context_layer = torch.unsqueeze(last_context_layer, 2)
+        context_layer = torch.cat((
             first_context_layer, second_context_layer, context_layer,
             second_last_context_layer, last_context_layer
-        ], 2)
-        context_layer = tf.reshape(context_layer, (b, h, m, -1)) * from_mask
-        context_layer = tf.transpose(context_layer, (0, 2, 1, 3))
+        ), 2)
+        context_layer = context_layer.view((b, h, m, -1)) * from_mask
+        context_layer = context_layer.permute(0, 2, 1, 3)
+
         return context_layer
