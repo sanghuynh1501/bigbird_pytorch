@@ -61,7 +61,6 @@ def get_single_block_row_attention(block_id,
             selected_random_blokcs.append(perm_block[i])
         if len(selected_random_blokcs) == num_rand_blocks:
             break
-    print(np.array(selected_random_blokcs).shape)
     return np.array(selected_random_blokcs, dtype=np.int32)
 
 
@@ -100,8 +99,6 @@ def bigbird_block_rand_mask_with_head(from_seq_length,
     assert from_seq_length // from_block_size == to_seq_length // to_block_size, \
         "Error the number of blocks needs to be same!"
 
-    print("lengths ", from_seq_length, from_block_size, to_seq_length, to_block_size)
-
     assert from_seq_length in plan_from_length, \
         "Error from sequence length not in plan!"
 
@@ -115,7 +112,7 @@ def bigbird_block_rand_mask_with_head(from_seq_length,
     rand_attn = [np.zeros((num_blocks,
                            np.sum(plan_num_rand_blocks[:max_plan_idx + 1])),
                           dtype=np.int32) for i in range(num_heads)]
-    print(rand_attn)
+
     # We will go iteratively over the plan blocks and pick random number of
     # Attention blocks from the legally allowed blocks
     for plan_idx in range(max_plan_idx + 1):
@@ -247,8 +244,6 @@ def bigbird_block_rand_mask(from_seq_length,
     assert from_seq_length // from_block_size == to_seq_length // to_block_size, \
         "Error the number of blocks needs to be same!"
 
-    print(from_seq_length, from_block_size, to_seq_length, to_block_size)
-
     rand_attn = np.zeros(
         (from_seq_length // from_block_size - 2, num_rand_blocks), dtype=np.int32)
     middle_seq = np.arange(1, to_seq_length // to_block_size - 1, dtype=np.int32)
@@ -301,7 +296,6 @@ def full_bigbird_mask(from_seq_length,
   Returns:
     attention mask matrix of shape [from_seq_length, to_seq_length]
   """
-    print('rand_attn ', rand_attn)
     if rand_attn is None:
         rand_attn = bigbird_block_rand_mask(MAX_SEQ_LEN, MAX_SEQ_LEN,
                                             from_block_size, to_block_size,
@@ -380,8 +374,6 @@ class OriginalFullAttention(nn.Module):
                 value_layer,
                 attention_mask):
         # Directly take n^2 dot product between "query" and "key".
-        print('query_layer.shape ', query_layer.shape)
-        print('key_layer.shape ', key_layer.shape)
         attention_scores = torch.einsum("bnfh,bnth->bnft", query_layer, key_layer)
         attention_scores = torch.mul(attention_scores,
                                      1.0 / np.sqrt(float(self.size_per_head)))

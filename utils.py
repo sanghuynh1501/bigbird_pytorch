@@ -76,8 +76,6 @@ def torch_gather5d(input_tensor, indexes):
     input_tensor = torch.unsqueeze(input_tensor, 2)
     input_tensor = input_tensor.expand(-1, -1, indexes.size(2), -1, -1, -1)
 
-    print(input_tensor.shape, indexes.shape)
-
     output_tensor = torch.gather(input_tensor, 3, indexes)
 
     return output_tensor
